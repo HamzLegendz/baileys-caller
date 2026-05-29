@@ -407,6 +407,10 @@ export class VoipClient {
                 const info = parsed.call_info ?? parsed.callInfo ?? {};
                 const callState = Number(info.call_state ?? info.callState ?? 0);
                 this.#activeCall?._updateState(callState);
+                // Emit participants list update if available
+                if (info.participants && Array.isArray(info.participants)) {
+                    this.#activeCall?.emit("participants_update", info.participants);
+                }
                 // Clear when call reaches terminal state (Idle=0 or Ending=6)
                 // CallState terminal states: Idle=0, Ending=13
                 if (callState === 0 || callState === 13) {
