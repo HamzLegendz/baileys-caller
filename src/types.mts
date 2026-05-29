@@ -71,6 +71,13 @@ export type VoipSdkConfig = {
    * - `"sqlite"`    → single SQLite database (better-sqlite3)
    */
   sessionBackend?: SessionBackend;
+
+  /**
+   * Called whenever the relay ICE round-trip time is measured.
+   * Use this to display live connection quality to the user.
+   * @param rttMs - Round-trip time in milliseconds
+   */
+  onIceRtt?: (rttMs: number) => void;
 };
 
 /** Mirrors the WhatsApp WASM `CallState` enum. */

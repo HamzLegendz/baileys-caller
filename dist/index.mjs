@@ -18,7 +18,9 @@ import { RelayRtcTransport } from "./relay-transport.mjs";
 import { SignalingBridge } from "./signaling.mjs";
 import { AudioFeeder } from "./audio-feeder.mjs";
 import { CallState } from "./types.mjs";
+import { useSQLiteAuthState } from "./sqlite-auth.mjs";
 export { CallState } from "./types.mjs";
+export { useSQLiteAuthState } from "./sqlite-auth.mjs";
 const SHA256_LEN = 32;
 const loadBaileys = async () => {
     try {
@@ -104,6 +106,16 @@ export class ActiveCall extends EventEmitter {
         catch { }
     };
     waitForEnd = () => this.#endPromise;
+    /** Change the audio source dynamically without ending the call. */
+    changeAudioSource = (newSource) => {
+        this._audioSource = newSource;
+        this.emit("change_audio", newSource);
+    };
+    /** Change the volume dynamically without ending the call. */
+    changeVolume = (newVolume) => {
+        this._volume = newVolume;
+        this.emit("change_volume", newVolume);
+    };
     /** @internal — called by VoipClient on WASM call-state change */
     _updateState = (state) => {
         this.#state = state;
@@ -138,7 +150,9 @@ export class VoipClient {
     #signaling = null;
     #sock = null;
     #activeCall = null;
+    #latestRttMs = null;
     #baileys = null;
+    #closeDb = null;
     // Capture state populated when WASM negotiates audio params
     #capturePtr = 0;
     #captureChunkBytes = 0;
@@ -149,13 +163,51 @@ export class VoipClient {
     constructor(config) {
         this.#config = config;
     }
+    /** Expose the underlying Baileys socket for external use (e.g. messaging). */
+    get sock() { return this.#sock; }
+    /** True once connect() has completed and WASM is ready. */
+    get isReady() { return this.#engine !== null && this.#engine.isInitialized(); }
+    /** True if a call is currently in progress. */
+    get hasActiveCall() { return this.#activeCall !== null; }
+    /** Latest ICE round-trip time in ms. Null until first measurement. */
+    get latestRttMs() { return this.#latestRttMs; }
+    /** Force-clear the active call state (use when call ended but state stuck). */
+    forceEndCall = () => {
+        if (this.#activeCall) {
+            try {
+                this.#activeCall._forceEnd("force_cleared");
+            }
+            catch { }
+            this.#activeCall = null;
+        }
+        try {
+            this.#engine?.endCall(0, true);
+        }
+        catch { }
+    };
     /** Connect to WhatsApp and bring up the WASM VoIP stack. */
     connect = async () => {
         this.#baileys = await loadBaileys();
         const { useMultiFileAuthState, default: makeWASocket, DisconnectReason } = this.#baileys;
         const makeSocket = makeWASocket ?? this.#baileys.makeWASocket ?? this.#baileys;
-        const authDir = resolve(this.#config.authDir);
-        const { state, saveCreds } = await useMultiFileAuthState(authDir);
+        const authPath = resolve(this.#config.authDir);
+        const sessionBackend = this.#config.sessionBackend ?? "multifile";
+        const authMethod = this.#config.authMethod ?? "qr";
+        let state;
+        let saveCreds;
+        let closeDb;
+        if (sessionBackend === "sqlite") {
+            const result = await useSQLiteAuthState(authPath);
+            state = result.state;
+            saveCreds = result.saveCreds;
+            closeDb = result.closeDb;
+        }
+        else {
+            const result = await useMultiFileAuthState(authPath);
+            state = result.state;
+            saveCreds = result.saveCreds;
+        }
+        this.#closeDb = closeDb ?? null;
         const silentLogger = {
             level: "silent",
             child: () => silentLogger,
@@ -176,6 +228,7 @@ export class VoipClient {
             let opened = false;
             let retries = 0;
             const maxRetries = 5;
+            let pairingRequested = false;
             const connectSocket = () => {
                 this.#sock = createSocket();
                 this.#sock.ev.on("creds.update", saveCreds);
@@ -190,8 +243,34 @@ export class VoipClient {
                         rejectOpen(err);
                     }
                 });
-                this.#sock.ev.on("connection.update", (update) => {
-                    if (update.qr) {
+                this.#sock.ev.on("connection.update", async (update) => {
+                    if (authMethod === "pairing" &&
+                        update.qr && // Socket needs a QR → intercept with pairing code
+                        !pairingRequested &&
+                        !opened) {
+                        pairingRequested = true;
+                        const phone = (this.#config.phoneNumber ?? "").replace(/\D/g, "");
+                        if (!phone) {
+                            rejectOpen(new Error('[baileys-caller] authMethod is "pairing" but phoneNumber is not set in VoipSdkConfig'));
+                            return;
+                        }
+                        try {
+                            const code = await this.#sock.requestPairingCode(phone);
+                            // Format: XXXX-XXXX for readability
+                            const formatted = code.match(/.{1,4}/g)?.join("-") ?? code;
+                            console.log("\n╔══════════════════════════════════╗");
+                            console.log("║   WhatsApp Pairing Code          ║");
+                            console.log(`║      ${formatted.padEnd(26)}║`);
+                            console.log("╚══════════════════════════════════╝");
+                            console.log("Open WhatsApp → Linked Devices → Link with phone number");
+                            console.log("Enter the code above, then wait...\n");
+                        }
+                        catch (err) {
+                            rejectOpen(err);
+                        }
+                        return;
+                    }
+                    if (authMethod === "qr" && update.qr) {
                         void import("qrcode-terminal")
                             .then((qrt) => (qrt.default ?? qrt).generate(update.qr, { small: true }))
                             .catch(() => {
@@ -224,7 +303,11 @@ export class VoipClient {
         await this.#signaling.init();
         this.#relay = new RelayRtcTransport({
             onTransportMessage: (data, ip, port) => this.#engine?.handleOnTransportMessage(data, ip, port),
-            onIceRtt: (rttMs, ip, port) => this.#engine?.updateIceRtt(rttMs, ip, port),
+            onIceRtt: (rttMs, ip, port) => {
+                this.#latestRttMs = rttMs;
+                this.#engine?.updateIceRtt(rttMs, ip, port);
+                this.#config.onIceRtt?.(rttMs);
+            },
         });
         this.#engine = new WasmEngine({
             callbacks: {
@@ -268,6 +351,7 @@ export class VoipClient {
         const targetPnJid = `${targetNumber}@s.whatsapp.net`;
         const durationMs = opts.durationMs ?? 120_000;
         const audioSource = opts.audioSource ?? "silence";
+        const volume = opts.volume ?? 1.0;
         const peerLid = await this.#signaling.resolveLid(targetPnJid);
         if (!peerLid)
             throw new Error(`Could not resolve LID for ${targetPnJid}`);
@@ -287,6 +371,7 @@ export class VoipClient {
         const callId = ("00" + randomBytes(16).toString("hex").slice(2)).toUpperCase();
         const call = new ActiveCall(callId, this.#engine, durationMs);
         call._audioSource = audioSource;
+        call._volume = volume;
         this.#activeCall = call;
         this.#engine.startCall({
             peerJid: peerLid,
@@ -311,8 +396,10 @@ export class VoipClient {
         this.#relay = null;
         this.#signaling = null;
         this.#sock = null;
+        // Close SQLite DB if using sqlite backend
+        this.#closeDb?.();
+        this.#closeDb = null;
     };
-    // ─── private ──────────────────────────────────────────────────────────────
     #handleCallEvent = (eventType, eventData) => {
         if (eventType === 16 && eventData) {
             try {
@@ -320,6 +407,11 @@ export class VoipClient {
                 const info = parsed.call_info ?? parsed.callInfo ?? {};
                 const callState = Number(info.call_state ?? info.callState ?? 0);
                 this.#activeCall?._updateState(callState);
+                // Clear when call reaches terminal state (Idle=0 or Ending=6)
+                // CallState terminal states: Idle=0, Ending=13
+                if (callState === 0 || callState === 13) {
+                    this.#activeCall = null;
+                }
             }
             catch { }
         }
@@ -332,6 +424,7 @@ export class VoipClient {
         }
         else if (eventType === 2) {
             this.#activeCall?._forceEnd("remote_end");
+            this.#activeCall = null; // clear on remote hang-up
         }
     };
     #handleAudioCaptureInit = (config) => {
@@ -347,14 +440,31 @@ export class VoipClient {
     #handleAudioCaptureStart = () => {
         if (!this.#engine || !this.#capturePtr)
             return;
-        const audioSource = this.#activeCall?._audioSource ?? "silence";
-        this.#feeder = new AudioFeeder(this.#captureSampleRate, this.#captureChannels, this.#captureFramesPerChunk, (chunk) => {
-            if (this.#engine && this.#capturePtr)
-                this.#engine.sendAudioData(chunk, this.#capturePtr);
-        }, audioSource);
-        this.#feeder.start();
+        const active = this.#activeCall;
+        if (!active)
+            return;
+        const audioSource = active._audioSource ?? "silence";
+        const volume = active._volume ?? 1.0;
+        const setupFeeder = (src, vol) => {
+            this.#feeder?.stop();
+            this.#feeder = new AudioFeeder(this.#captureSampleRate, this.#captureChannels, this.#captureFramesPerChunk, (chunk) => {
+                if (this.#engine && this.#capturePtr)
+                    this.#engine.sendAudioData(chunk, this.#capturePtr);
+            }, src, vol);
+            this.#feeder.start();
+        };
+        setupFeeder(audioSource, volume);
+        active.on("change_audio", (newSrc) => {
+            const vol = active._volume ?? 1.0;
+            setupFeeder(newSrc, vol);
+        });
+        active.on("change_volume", (newVol) => {
+            setupFeeder(active._audioSource, newVol);
+        });
     };
     #handleAudioCaptureStop = () => {
+        this.#activeCall?.removeAllListeners("change_audio");
+        this.#activeCall?.removeAllListeners("change_volume");
         this.#feeder?.stop();
         this.#feeder = null;
         if (this.#engine && this.#capturePtr) {

@@ -29,10 +29,41 @@ export type CallEvents = {
     ended: (reason: string) => void;
     error: (err: Error) => void;
 };
+/** Auth method to use when connecting. */
+export type AuthMethod = "qr" | "pairing";
+/** Session storage backend. */
+export type SessionBackend = "multifile" | "sqlite";
 /** Top-level SDK configuration. */
 export type VoipSdkConfig = {
-    /** Path to a Baileys multi-file auth state directory. */
+    /**
+     * Path to the auth storage.
+     * - `multifile` backend → path to a **directory**
+     * - `sqlite` backend    → path to a **file** (e.g. `"./session.db"`)
+     */
     authDir: string;
+    /**
+     * Authentication method used when the session is new / expired.
+     * - `"qr"`      → print a QR code to the terminal (default)
+     * - `"pairing"` → request a numeric pairing code; requires `phoneNumber`
+     */
+    authMethod?: AuthMethod;
+    /**
+     * Phone number in international format **without** `+` or spaces,
+     * e.g. `"628123456789"`. Required when `authMethod === "pairing"`.
+     */
+    phoneNumber?: string;
+    /**
+     * Session storage backend.
+     * - `"multifile"` → Baileys default (JSON files) — default
+     * - `"sqlite"`    → single SQLite database (better-sqlite3)
+     */
+    sessionBackend?: SessionBackend;
+    /**
+     * Called whenever the relay ICE round-trip time is measured.
+     * Use this to display live connection quality to the user.
+     * @param rttMs - Round-trip time in milliseconds
+     */
+    onIceRtt?: (rttMs: number) => void;
 };
 /** Mirrors the WhatsApp WASM `CallState` enum. */
 export declare const CallState: {

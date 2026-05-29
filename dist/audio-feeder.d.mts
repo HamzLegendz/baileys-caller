@@ -5,11 +5,12 @@ export declare class AudioFeeder {
     private readonly framesPerChunk;
     private readonly onChunk;
     private readonly source;
+    private readonly volume;
     droppedChunks: number;
     underflowChunks: number;
     bytesProduced: number;
     chunksEmitted: number;
-    constructor(sampleRate: number, channels: number, framesPerChunk: number, onChunk: (chunk: Float32Array) => void, source?: string);
+    constructor(sampleRate: number, channels: number, framesPerChunk: number, onChunk: (chunk: Float32Array) => void, source?: string, volume?: number);
     start: () => void;
     stop: () => void;
 }

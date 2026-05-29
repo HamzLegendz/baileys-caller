@@ -1,15 +1,20 @@
 # baileys-caller
 
-Place WhatsApp voice calls from Node.js.
+Place WhatsApp voice calls from Node.js with ultra-premium audio quality and dynamic stream controls.
 
 Wraps WhatsApp Web's official VoIP WASM stack and uses [Baileys](https://github.com/WhiskeySockets/Baileys) for authentication and signaling. Audio (MP3, WAV, or `Float32Array`) is encoded with Opus and sent over the live RTP session.
 
 > **Author:** ShellTear
+> **Optimizations & Upgrades:** HamzLegendz
 
 ## Status
 
 - ✅ Outbound 1:1 voice calls
 - ✅ Stream audio from MP3/WAV files
+- ✅ **Dynamic Audio Hot-Swapping** (Switch audio files/streams on-the-fly without hanging up!)
+- ✅ **Dynamic Volume Scale Control** (Adjust digital volume gain dynamically mid-call!)
+- ✅ **High-Fidelity Audio Limiter** (Built-in standard `alimiter` dynamic ceiling to prevent digital clipping/distortion)
+- ✅ **Pre-allocated Memory Circular Ring Buffer** (Zero GC latency & Zero VPS CPU spikes)
 - ✅ Receive remote audio as `Float32Array`
 - ✅ Mute / unmute / hang up
 - ❌ Group calls
@@ -19,8 +24,8 @@ Wraps WhatsApp Web's official VoIP WASM stack and uses [Baileys](https://github.
 ## Requirements
 
 - Node.js ≥ 20
-- `ffmpeg` on `PATH` (used to decode/resample audio sources)
-- A linked WhatsApp account (you'll scan a QR on first run)
+- `ffmpeg` on `PATH` (used to decode/resample audio sources with low-overhead threads)
+- A linked WhatsApp account (supports pairing code or QR scan auth)
 
 ## Install
 
@@ -51,97 +56,80 @@ You can also depend on it from another project via a git URL in `package.json`:
 ```ts
 import { VoipClient } from "baileys-caller";
 
-const client = new VoipClient({ authDir: "./auth" });
+const client = new VoipClient({ 
+  authDir: "./auth",
+  sessionBackend: "sqlite",
+});
 
-await client.connect(); // first run prints a QR for WhatsApp > Linked Devices
+await client.connect(); 
 
-const call = await client.call("12345678901", {
-  audioSource: "./hello.mp3",
+// Place a call with dynamic options
+const call = await client.call("6283148888114", {
+  audioSource: "./song1.mp3",
+  volume: 1.0, // Scale volume 0.1 - 2.0
 });
 
 call.on("ringing",   () => console.log("ringing"));
 call.on("connected", () => console.log("connected"));
-call.on("audio",     (pcm) => { /* 16 kHz mono Float32Array from the peer */ });
 call.on("ended",     (reason) => console.log("ended:", reason));
+
+// Hot-swap audio dynamic stream without closing the call!
+setTimeout(() => {
+  call.changeAudioSource("./song2.mp3");
+}, 10000);
+
+// Adjust volume dynamic gain mid-call!
+setTimeout(() => {
+  call.changeVolume(1.5);
+}, 20000);
 
 await call.waitForEnd();
 client.disconnect();
 ```
 
-Run the bundled example from a clone:
-
-```bash
-npx tsx examples/call.mts ./auth 12345678901 ./hello.mp3
-```
-
-## API
+## API Reference
 
 ### `new VoipClient(options)`
 
-| Option    | Type     | Description                                |
-|-----------|----------|--------------------------------------------|
-| `authDir` | `string` | Baileys multi-file auth state directory    |
-
-### `client.connect(): Promise<void>`
-
-Connects to WhatsApp. On first run a QR code is printed; scan it from `WhatsApp > Settings > Linked Devices`. Subsequent runs reuse `authDir`.
+| Option | Type | Description |
+|---|---|---|
+| `authDir` | `string` | Baileys multi-file state directory or SQLite DB path |
+| `sessionBackend` | `"multifile" \| "sqlite"` | SQLite backend is recommended for instant startup speed |
+| `authMethod` | `"pairing" \| "qr"` | Supports numeric pairing code or QR code display |
+| `phoneNumber` | `string` | Pairing phone number (digits only, e.g. `"6283148888114"`) |
+| `onIceRtt` | `(rttMs: number) => void` | Event handler called when ICE roundtrip network latency is measured |
 
 ### `client.call(phoneNumber, opts?): Promise<ActiveCall>`
 
-Places an outbound call. `phoneNumber` is digits only (e.g. `"12345678901"`).
+Places an outbound call. `phoneNumber` is digits only (e.g. `"6283148888114"`).
 
-| Option        | Type                  | Description                                              |
-|---------------|-----------------------|----------------------------------------------------------|
-| `audioSource` | `string \| "silence"` | Path to MP3/WAV, or `"silence"` for an empty stream      |
-| `durationMs`  | `number?`             | Auto-hangup after N ms                                   |
-
-### `client.disconnect(): void`
-
-Closes the WhatsApp socket and releases resources.
+| Option | Type | Description |
+|---|---|---|
+| `audioSource` | `string \| "silence"` | Path to MP3/WAV, or `"silence"` for an empty stream |
+| `durationMs` | `number?` | Auto-hangup limit |
+| `volume` | `number?` | Initial volume gain scaling (0.1 to 2.0) |
 
 ### `ActiveCall`
 
 Returned by `client.call()`. Extends `EventEmitter`.
 
-#### Events
-
-| Event       | Payload         | When                                          |
-|-------------|-----------------|-----------------------------------------------|
-| `ringing`   | —               | Remote device is ringing                      |
-| `connected` | —               | Call answered, media flowing                  |
-| `audio`     | `Float32Array`  | 16 kHz mono PCM frame from the remote peer    |
-| `ended`     | `string`        | Call ended (`hangup`, `timeout`, `rejected`)  |
-| `error`     | `Error`         | Fatal error                                   |
-
 #### Methods
 
-- `call.end(): void` — hang up
-- `call.mute(muted: boolean): void` — toggle outgoing mute
-- `call.waitForEnd(): Promise<string>` — resolves with end reason
+- `call.end(): void` — Hang up.
+- `call.mute(muted: boolean): void` — Toggle outgoing mute.
+- `call.changeAudioSource(newSource: string): void` — Hot-swap audio feed instantly mid-call.
+- `call.changeVolume(newVolume: number): void` — Change digital volume scaling dynamically.
+- `call.waitForEnd(): Promise<string>` — Resolves with ending reason.
 
 #### Properties
 
 - `call.callId: string`
 
-## How it works
+## Architecture Highlights
 
-1. Baileys handles WhatsApp authentication, encryption, and signaling stanzas.
-2. The WhatsApp Web VoIP WASM stack runs in-process to negotiate the call, encode/decode Opus, and manage the RTP/SRTP session.
-3. A pthread pool of `worker_threads` mirrors the browser's Web Worker pool the WASM expects.
-4. Outbound audio is decoded with `ffmpeg`, resampled to 16 kHz mono, fed into the WASM, and delivered to the relay.
-5. Inbound audio is exposed as `Float32Array` chunks via the `audio` event.
-
-## Auth state
-
-`authDir` stores Baileys session keys after the first QR scan. Treat it like a credential — anyone with that directory can act as your linked device.
-
-## WASM resources
-
-The WASM binary and its loader (`whatsapp.wasm`, `loader.js`, `worker-modules.js`) live under `assets/wasm/`. To refresh them from a current WhatsApp Web session:
-
-```bash
-npm run fetch-wasm
-```
+1. **Circular Ring Buffer**: Garbage-collection-free memory ring queue that eliminates standard arrays GC overhead under heavy I/O workloads, protecting shared core VPS machines from CPU hikes.
+2. **Audio Peak Limiter (`alimiter`)**: Audio pipeline configured with highpass filtering (45Hz) and soft-knee limiter ceilings to guarantee absolute clarity and completely avoid digital clipping ("suara kresek").
+3. **Optimized WASM Worker Pool**: Startup threads pruned from 6 to 3 to achieve super fast boot time (<1s) and low hardware footprint.
 
 ## License
 

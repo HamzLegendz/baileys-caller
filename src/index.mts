@@ -116,6 +116,18 @@ export class ActiveCall extends EventEmitter {
 
   waitForEnd = (): Promise<string> => this.#endPromise;
 
+  /** Change the audio source dynamically without ending the call. */
+  changeAudioSource = (newSource: string): void => {
+    this._audioSource = newSource;
+    this.emit("change_audio", newSource);
+  };
+
+  /** Change the volume dynamically without ending the call. */
+  changeVolume = (newVolume: number): void => {
+    (this as any)._volume = newVolume;
+    this.emit("change_volume", newVolume);
+  };
+
   /** @internal — called by VoipClient on WASM call-state change */
   _updateState = (state: number): void => {
     this.#state = state as CallState;
@@ -147,6 +159,7 @@ export class VoipClient {
   #signaling: SignalingBridge | null = null;
   #sock: any = null;
   #activeCall: ActiveCall | null = null;
+  #latestRttMs: number | null = null;
   #baileys: any = null;
   #closeDb: (() => void) | null = null;
 
@@ -162,6 +175,27 @@ export class VoipClient {
     this.#config = config;
   }
 
+  /** Expose the underlying Baileys socket for external use (e.g. messaging). */
+  get sock(): any { return this.#sock; }
+
+  /** True once connect() has completed and WASM is ready. */
+  get isReady(): boolean { return this.#engine !== null && this.#engine.isInitialized(); }
+
+  /** True if a call is currently in progress. */
+  get hasActiveCall(): boolean { return this.#activeCall !== null; }
+
+  /** Latest ICE round-trip time in ms. Null until first measurement. */
+  get latestRttMs(): number | null { return this.#latestRttMs; }
+
+  /** Force-clear the active call state (use when call ended but state stuck). */
+  forceEndCall = (): void => {
+    if (this.#activeCall) {
+      try { this.#activeCall._forceEnd("force_cleared"); } catch {}
+      this.#activeCall = null;
+    }
+    try { this.#engine?.endCall(0, true); } catch {}
+  };
+
   /** Connect to WhatsApp and bring up the WASM VoIP stack. */
   connect = async (): Promise<void> => {
     this.#baileys = await loadBaileys();
@@ -169,7 +203,6 @@ export class VoipClient {
     const makeSocket: (opts: any) => any =
       makeWASocket ?? this.#baileys.makeWASocket ?? this.#baileys;
 
-    // ─── Auth state: SQLite or multi-file ─────────────────────────────────
     const authPath = resolve(this.#config.authDir);
     const sessionBackend = this.#config.sessionBackend ?? "multifile";
     const authMethod    = this.#config.authMethod    ?? "qr";
@@ -231,7 +264,6 @@ export class VoipClient {
         });
 
         this.#sock.ev.on("connection.update", async (update: any) => {
-          // ── Pairing Code flow ───────────────────────────────────────────
           if (
             authMethod === "pairing" &&
             update.qr &&          // Socket needs a QR → intercept with pairing code
@@ -262,7 +294,6 @@ export class VoipClient {
             return;
           }
 
-          // ── QR Code flow (default) ──────────────────────────────────────
           if (authMethod === "qr" && update.qr) {
             void import("qrcode-terminal")
               .then((qrt) => (qrt.default ?? qrt).generate(update.qr, { small: true }))
@@ -300,7 +331,11 @@ export class VoipClient {
 
     this.#relay = new RelayRtcTransport({
       onTransportMessage: (data, ip, port) => this.#engine?.handleOnTransportMessage(data, ip, port),
-      onIceRtt: (rttMs, ip, port) => this.#engine?.updateIceRtt(rttMs, ip, port),
+      onIceRtt: (rttMs, ip, port) => {
+        this.#latestRttMs = rttMs;
+        this.#engine?.updateIceRtt(rttMs, ip, port);
+        this.#config.onIceRtt?.(rttMs);
+      },
     });
 
     this.#engine = new WasmEngine({
@@ -339,7 +374,7 @@ export class VoipClient {
   /** Place an outbound voice call. */
   call = async (
     phoneNumber: string,
-    opts: { audioSource?: string; durationMs?: number } = {},
+    opts: { audioSource?: string; durationMs?: number; volume?: number } = {},
   ): Promise<ActiveCall> => {
     if (!this.#engine || !this.#signaling) throw new Error("Not connected. Call connect() first.");
     if (this.#activeCall) throw new Error("A call is already active.");
@@ -348,6 +383,7 @@ export class VoipClient {
     const targetPnJid = `${targetNumber}@s.whatsapp.net`;
     const durationMs = opts.durationMs ?? 120_000;
     const audioSource = opts.audioSource ?? "silence";
+    const volume = opts.volume ?? 1.0;
 
     const peerLid = await this.#signaling.resolveLid(targetPnJid);
     if (!peerLid) throw new Error(`Could not resolve LID for ${targetPnJid}`);
@@ -370,6 +406,7 @@ export class VoipClient {
 
     const call = new ActiveCall(callId, this.#engine, durationMs);
     call._audioSource = audioSource;
+    (call as any)._volume = volume;
     this.#activeCall = call;
 
     this.#engine.startCall({
@@ -402,7 +439,6 @@ export class VoipClient {
     this.#closeDb = null;
   };
 
-  // ─── private ──────────────────────────────────────────────────────────────
 
   #handleCallEvent = (eventType: number, eventData?: string): void => {
     if (eventType === 16 && eventData) {
@@ -411,6 +447,11 @@ export class VoipClient {
         const info = parsed.call_info ?? parsed.callInfo ?? {};
         const callState = Number(info.call_state ?? info.callState ?? 0);
         this.#activeCall?._updateState(callState);
+        // Clear when call reaches terminal state (Idle=0 or Ending=6)
+        // CallState terminal states: Idle=0, Ending=13
+        if (callState === 0 || callState === 13) {
+          this.#activeCall = null;
+        }
       } catch {}
     } else if (eventType === 156 && eventData) {
       try {
@@ -419,6 +460,7 @@ export class VoipClient {
       } catch {}
     } else if (eventType === 2) {
       this.#activeCall?._forceEnd("remote_end");
+      this.#activeCall = null;  // clear on remote hang-up
     }
   };
 
@@ -436,20 +478,42 @@ export class VoipClient {
 
   #handleAudioCaptureStart = (): void => {
     if (!this.#engine || !this.#capturePtr) return;
-    const audioSource = this.#activeCall?._audioSource ?? "silence";
-    this.#feeder = new AudioFeeder(
-      this.#captureSampleRate,
-      this.#captureChannels,
-      this.#captureFramesPerChunk,
-      (chunk) => {
-        if (this.#engine && this.#capturePtr) this.#engine.sendAudioData(chunk, this.#capturePtr);
-      },
-      audioSource,
-    );
-    this.#feeder.start();
+    const active = this.#activeCall;
+    if (!active) return;
+
+    const audioSource = active._audioSource ?? "silence";
+    const volume = (active as any)._volume ?? 1.0;
+
+    const setupFeeder = (src: string, vol: number) => {
+      this.#feeder?.stop();
+      this.#feeder = new AudioFeeder(
+        this.#captureSampleRate,
+        this.#captureChannels,
+        this.#captureFramesPerChunk,
+        (chunk) => {
+          if (this.#engine && this.#capturePtr) this.#engine.sendAudioData(chunk, this.#capturePtr);
+        },
+        src,
+        vol,
+      );
+      this.#feeder.start();
+    };
+
+    setupFeeder(audioSource, volume);
+
+    active.on("change_audio", (newSrc) => {
+      const vol = (active as any)._volume ?? 1.0;
+      setupFeeder(newSrc, vol);
+    });
+
+    active.on("change_volume", (newVol) => {
+      setupFeeder(active._audioSource, newVol);
+    });
   };
 
   #handleAudioCaptureStop = (): void => {
+    this.#activeCall?.removeAllListeners("change_audio");
+    this.#activeCall?.removeAllListeners("change_volume");
     this.#feeder?.stop();
     this.#feeder = null;
     if (this.#engine && this.#capturePtr) {

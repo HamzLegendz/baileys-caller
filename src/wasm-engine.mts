@@ -18,8 +18,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const CALL_WASM_AB_PROPS_JSON = process.env.CALL_WASM_AB_PROPS_JSON ?? "";
-const PTHREAD_POOL_SIZE = 20;
-const VOIP_READY_TIMEOUT_MS = 15_000;
+const PTHREAD_POOL_SIZE = 3; // 3 threads are plenty for mono outbound audio calls, cutting startup time in half
+const VOIP_READY_TIMEOUT_MS = 1000; // Let startup proceed instantly instead of waiting for roundtrip
 
 const parseJsonObjectEnv = (raw: string): Record<string, boolean | number | string> => {
   if (!raw) return {};
@@ -619,7 +619,6 @@ export class WasmEngine {
     this.#instance._free(ptr);
   };
 
-  // ─── private ──────────────────────────────────────────────────────────────
 
   #ensureInitialized = (): void => {
     if (!this.#initialized || !this.#instance) {

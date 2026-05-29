@@ -176,7 +176,6 @@ export class SignalingBridge {
         }
     };
     getRemoteDeviceJid = (callId) => this.#remoteDevicePeerByCallId.get(callId);
-    // ─── private — outbound signaling ─────────────────────────────────────────
     #doSendSignaling = async (peerJid, callId, xmlPayload) => {
         const { decodeBinaryNode, getBinaryNodeChild } = this.#baileys;
         const rawPayload = Buffer.from(xmlPayload);
@@ -280,7 +279,6 @@ export class SignalingBridge {
             catch { }
         })();
     };
-    // ─── private — inbound signaling ──────────────────────────────────────────
     #doProcessIncomingCall = async (node, voip, activeCallId) => {
         const { getAllBinaryNodeChildren, getBinaryNodeChild, encodeBinaryNode } = this.#baileys;
         const voipChild = getAllBinaryNodeChildren(node)[0];
@@ -480,7 +478,6 @@ export class SignalingBridge {
         });
         setNodeChildren(voipNode, children);
     };
-    // ─── private — JID utilities ──────────────────────────────────────────────
     #toBareJid = (jid) => {
         const { jidDecode, jidEncode } = this.#baileys;
         const decoded = jidDecode(jid);
@@ -570,7 +567,6 @@ export class SignalingBridge {
         }
         return [...result].slice(0, 5);
     };
-    // ─── private — TC token ───────────────────────────────────────────────────
     #rememberTcToken = (jid, token, timestamp = "") => {
         const bareJid = this.#toBareJid(jid);
         if (!token.length)

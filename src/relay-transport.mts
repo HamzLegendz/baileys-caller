@@ -369,7 +369,6 @@ export class RelayRtcTransport {
     for (const id of [...this.#connections.keys()]) this.#closeConnection(id);
   };
 
-  // ─── private ──────────────────────────────────────────────────────────────
 
   #getOrCreateConnection = (info: RelayConnectionInfo): RelayConnectionRuntime => {
     const existing = this.#connections.get(info.id);
@@ -482,11 +481,21 @@ export class RelayRtcTransport {
     }, CONNECTION_TIMEOUT_MS);
 
     const offer = await pc.createOffer();
+    // Guard: PC might have been closed while createOffer() was awaiting
+    if (pc.signalingState === "closed") {
+      connection.state = "failed";
+      return;
+    }
     await pc.setLocalDescription(offer);
     const remoteSdp = buildRemoteRelayAnswer(offer.sdp ?? "", {
       ...connection.info,
       port: getRtcConnectPort(connection.info),
     });
+    // Guard again before setRemoteDescription
+    if (pc.signalingState === "closed") {
+      connection.state = "failed";
+      return;
+    }
     await pc.setRemoteDescription({ type: "answer", sdp: remoteSdp });
   };
 
@@ -527,6 +536,7 @@ export class RelayRtcTransport {
       };
 
       const offer = await pc.createOffer({ iceRestart: false });
+      if (pc.signalingState === "closed") { connection.state = "failed"; return; }
       let localSdp = offer.sdp ?? "";
       if (connection.iceCandidate) {
         localSdp = `${removeIceCandidates(localSdp)}a=${connection.iceCandidate}\r\na=end-of-candidates\r\n`;
@@ -536,6 +546,7 @@ export class RelayRtcTransport {
         ...connection.info,
         port: getRtcConnectPort(connection.info),
       });
+      if (pc.signalingState === "closed") { connection.state = "failed"; return; }
       await pc.setRemoteDescription({ type: "answer", sdp: remoteSdp });
     } catch {
       connection.state = "failed";
