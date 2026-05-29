@@ -55,8 +55,8 @@ export declare class VoipClient extends EventEmitter {
     forceEndCall: () => void;
     /** Connect to WhatsApp and bring up the WASM VoIP stack. */
     connect: () => Promise<void>;
-    /** Place an outbound voice call. */
-    call: (phoneNumber: string, opts?: {
+    /** Place an outbound voice call. Support both private and group JIDs. */
+    call: (targetJid: string, opts?: {
         audioSource?: string;
         durationMs?: number;
         volume?: number;

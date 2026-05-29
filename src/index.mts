@@ -372,21 +372,21 @@ export class VoipClient extends EventEmitter {
     });
   };
 
-  /** Place an outbound voice call. */
+  /** Place an outbound voice call. Support both private and group JIDs. */
   call = async (
-    phoneNumber: string,
+    targetJid: string,
     opts: { audioSource?: string; durationMs?: number; volume?: number } = {},
   ): Promise<ActiveCall> => {
     if (!this.#engine || !this.#signaling) throw new Error("Not connected. Call connect() first.");
     if (this.#activeCall) throw new Error("A call is already active.");
 
-    const targetNumber = phoneNumber.replace(/\D/g, "");
-    const targetPnJid = `${targetNumber}@s.whatsapp.net`;
+    const isGroup = targetJid.endsWith("@g.us");
+    const targetPnJid = isGroup ? targetJid : `${targetJid.replace(/\D/g, "")}@s.whatsapp.net`;
     const durationMs = opts.durationMs ?? 120_000;
     const audioSource = opts.audioSource ?? "silence";
     const volume = opts.volume ?? 1.0;
 
-    const peerLid = await this.#signaling.resolveLid(targetPnJid);
+    const peerLid = isGroup ? targetJid : await this.#signaling.resolveLid(targetPnJid);
     if (!peerLid) throw new Error(`Could not resolve LID for ${targetPnJid}`);
 
     for (const jid of [targetPnJid, peerLid]) {
@@ -394,14 +394,30 @@ export class VoipClient extends EventEmitter {
     }
     await new Promise((r) => setTimeout(r, 750));
 
-    const peerDeviceJids = await this.#signaling.discoverPeerDevices(peerLid);
-    const deviceList = peerDeviceJids.length ? peerDeviceJids : [toBareJid(peerLid)];
+    let deviceList: string[] = [];
+    if (isGroup) {
+      // Resolve up to 5 active group participants to keep signaling load optimal
+      try {
+        const metadata = await this.#sock.groupMetadata(targetJid);
+        const participants = metadata.participants.map((p: any) => p.id);
+        deviceList = participants.slice(0, 5);
+      } catch {
+        deviceList = [this.#sock.authState.creds.me?.id];
+      }
+    } else {
+      const peerDeviceJids = await this.#signaling.discoverPeerDevices(peerLid);
+      deviceList = peerDeviceJids.length ? peerDeviceJids : [toBareJid(peerLid)];
+    }
 
     await this.#signaling.ensureSessionsForPeers(deviceList);
 
     await new Promise((r) => setTimeout(r, 500));
-    await this.#signaling.issueTcToken(peerLid);
-    const tcToken = await this.#signaling.ensureTcToken(peerLid, targetPnJid);
+    
+    let tcToken: Uint8Array | undefined = undefined;
+    if (!isGroup) {
+      await this.#signaling.issueTcToken(peerLid);
+      tcToken = await this.#signaling.ensureTcToken(peerLid, targetPnJid);
+    }
 
     const callId = ("00" + randomBytes(16).toString("hex").slice(2)).toUpperCase();
 
@@ -416,7 +432,7 @@ export class VoipClient extends EventEmitter {
       peerList: deviceList,
       callId,
       isVideo: false,
-      isLidCall: true,
+      isLidCall: !isGroup && peerLid.includes("@lid"),
       isFromDialer: false,
       extraData: tcToken,
     });
