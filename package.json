@@ -24,16 +24,19 @@
   "scripts": {
     "build": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json",
     "example": "tsx examples/call.mts",
+    "example:pairing": "tsx examples/call-pairing.mts",
     "fetch-wasm": "node scripts/fetch-wasm-resources.mjs"
   },
   "dependencies": {
     "@roamhq/wrtc": "^0.10.0",
+    "better-sqlite3": "^11.0.0",
     "qrcode-terminal": "^0.12.0"
   },
   "peerDependencies": {
     "@whiskeysockets/baileys": "^7.0.0-rc11"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"

@@ -33,10 +33,44 @@ export type CallEvents = {
   error: (err: Error) => void;
 };
 
+/** Auth method to use when connecting. */
+export type AuthMethod =
+  | "qr"          // Show a QR code in the terminal (default)
+  | "pairing";    // Use a pairing code (phone number required)
+
+/** Session storage backend. */
+export type SessionBackend =
+  | "multifile"   // Baileys default: many JSON files in authDir (default)
+  | "sqlite";     // Single SQLite DB file at authDir (better-sqlite3)
+
 /** Top-level SDK configuration. */
 export type VoipSdkConfig = {
-  /** Path to a Baileys multi-file auth state directory. */
+  /**
+   * Path to the auth storage.
+   * - `multifile` backend → path to a **directory**
+   * - `sqlite` backend    → path to a **file** (e.g. `"./session.db"`)
+   */
   authDir: string;
+
+  /**
+   * Authentication method used when the session is new / expired.
+   * - `"qr"`      → print a QR code to the terminal (default)
+   * - `"pairing"` → request a numeric pairing code; requires `phoneNumber`
+   */
+  authMethod?: AuthMethod;
+
+  /**
+   * Phone number in international format **without** `+` or spaces,
+   * e.g. `"628123456789"`. Required when `authMethod === "pairing"`.
+   */
+  phoneNumber?: string;
+
+  /**
+   * Session storage backend.
+   * - `"multifile"` → Baileys default (JSON files) — default
+   * - `"sqlite"`    → single SQLite database (better-sqlite3)
+   */
+  sessionBackend?: SessionBackend;
 };
 
 /** Mirrors the WhatsApp WASM `CallState` enum. */

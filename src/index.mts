@@ -19,9 +19,11 @@ import { RelayRtcTransport, type RelayListUpdatePayload } from "./relay-transpor
 import { SignalingBridge } from "./signaling.mjs";
 import { AudioFeeder } from "./audio-feeder.mjs";
 import { CallState, type VoipSdkConfig } from "./types.mjs";
+import { useSQLiteAuthState } from "./sqlite-auth.mjs";
 
-export type { VoipSdkConfig, CallOptions, CallEvents, AudioConfig } from "./types.mjs";
+export type { VoipSdkConfig, CallOptions, CallEvents, AudioConfig, AuthMethod, SessionBackend } from "./types.mjs";
 export { CallState } from "./types.mjs";
+export { useSQLiteAuthState } from "./sqlite-auth.mjs";
 
 const SHA256_LEN = 32;
 
@@ -146,6 +148,7 @@ export class VoipClient {
   #sock: any = null;
   #activeCall: ActiveCall | null = null;
   #baileys: any = null;
+  #closeDb: (() => void) | null = null;
 
   // Capture state populated when WASM negotiates audio params
   #capturePtr = 0;
@@ -166,8 +169,27 @@ export class VoipClient {
     const makeSocket: (opts: any) => any =
       makeWASocket ?? this.#baileys.makeWASocket ?? this.#baileys;
 
-    const authDir = resolve(this.#config.authDir);
-    const { state, saveCreds } = await useMultiFileAuthState(authDir);
+    // ─── Auth state: SQLite or multi-file ─────────────────────────────────
+    const authPath = resolve(this.#config.authDir);
+    const sessionBackend = this.#config.sessionBackend ?? "multifile";
+    const authMethod    = this.#config.authMethod    ?? "qr";
+
+    let state: any;
+    let saveCreds: () => void;
+    let closeDb: (() => void) | undefined;
+
+    if (sessionBackend === "sqlite") {
+      const result = await useSQLiteAuthState(authPath);
+      state    = result.state;
+      saveCreds = result.saveCreds;
+      closeDb   = result.closeDb;
+    } else {
+      const result = await useMultiFileAuthState(authPath);
+      state    = result.state;
+      saveCreds = result.saveCreds;
+    }
+
+    this.#closeDb = closeDb ?? null;
 
     const silentLogger: any = {
       level: "silent",
@@ -191,6 +213,7 @@ export class VoipClient {
       let opened = false;
       let retries = 0;
       const maxRetries = 5;
+      let pairingRequested = false;
 
       const connectSocket = () => {
         this.#sock = createSocket();
@@ -207,8 +230,40 @@ export class VoipClient {
           }
         });
 
-        this.#sock.ev.on("connection.update", (update: any) => {
-          if (update.qr) {
+        this.#sock.ev.on("connection.update", async (update: any) => {
+          // ── Pairing Code flow ───────────────────────────────────────────
+          if (
+            authMethod === "pairing" &&
+            update.qr &&          // Socket needs a QR → intercept with pairing code
+            !pairingRequested &&
+            !opened
+          ) {
+            pairingRequested = true;
+            const phone = (this.#config.phoneNumber ?? "").replace(/\D/g, "");
+            if (!phone) {
+              rejectOpen(new Error(
+                '[baileys-caller] authMethod is "pairing" but phoneNumber is not set in VoipSdkConfig'
+              ));
+              return;
+            }
+            try {
+              const code = await this.#sock.requestPairingCode(phone);
+              // Format: XXXX-XXXX for readability
+              const formatted = code.match(/.{1,4}/g)?.join("-") ?? code;
+              console.log("\n╔══════════════════════════════════╗");
+              console.log("║   WhatsApp Pairing Code          ║");
+              console.log(`║      ${formatted.padEnd(26)}║`);
+              console.log("╚══════════════════════════════════╝");
+              console.log("Open WhatsApp → Linked Devices → Link with phone number");
+              console.log("Enter the code above, then wait...\n");
+            } catch (err) {
+              rejectOpen(err as Error);
+            }
+            return;
+          }
+
+          // ── QR Code flow (default) ──────────────────────────────────────
+          if (authMethod === "qr" && update.qr) {
             void import("qrcode-terminal")
               .then((qrt) => (qrt.default ?? qrt).generate(update.qr, { small: true }))
               .catch(() => {
@@ -216,6 +271,7 @@ export class VoipClient {
                 console.log(update.qr);
               });
           }
+
           if (update.connection === "open") {
             opened = true;
             process.removeAllListeners("uncaughtException");
@@ -341,6 +397,9 @@ export class VoipClient {
     this.#relay = null;
     this.#signaling = null;
     this.#sock = null;
+    // Close SQLite DB if using sqlite backend
+    this.#closeDb?.();
+    this.#closeDb = null;
   };
 
   // ─── private ──────────────────────────────────────────────────────────────
