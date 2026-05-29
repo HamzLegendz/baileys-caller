@@ -40,7 +40,7 @@ export declare class ActiveCall extends EventEmitter {
     _forceEnd: (reason: string) => void;
 }
 /** Top-level client. Connects to WhatsApp and lets you place calls. */
-export declare class VoipClient {
+export declare class VoipClient extends EventEmitter {
     #private;
     constructor(config: VoipSdkConfig);
     /** Expose the underlying Baileys socket for external use (e.g. messaging). */

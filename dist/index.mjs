@@ -143,7 +143,7 @@ export class ActiveCall extends EventEmitter {
     };
 }
 /** Top-level client. Connects to WhatsApp and lets you place calls. */
-export class VoipClient {
+export class VoipClient extends EventEmitter {
     #config;
     #engine = null;
     #relay = null;
@@ -161,6 +161,7 @@ export class VoipClient {
     #captureFramesPerChunk = 320;
     #feeder = null;
     constructor(config) {
+        super();
         this.#config = config;
     }
     /** Expose the underlying Baileys socket for external use (e.g. messaging). */
@@ -406,13 +407,20 @@ export class VoipClient {
                 const parsed = JSON.parse(eventData);
                 const info = parsed.call_info ?? parsed.callInfo ?? {};
                 const callState = Number(info.call_state ?? info.callState ?? 0);
-                this.#activeCall?._updateState(callState);
-                // Emit participants list update if available
-                if (info.participants && Array.isArray(info.participants)) {
-                    this.#activeCall?.emit("participants_update", info.participants);
+                // Dynamically instantiate ActiveCall on incoming call events if activeCall is null
+                if (!this.#activeCall && callState > 0 && callState !== 13) {
+                    const incomingCallId = info.call_id ?? info.callId ?? parsed.call_id ?? parsed.callId ?? "INCOMING";
+                    this.#activeCall = new ActiveCall(incomingCallId, this.#engine, 600_000);
+                    this.#activeCall._audioSource = "silence";
+                    this.emit("call", this.#activeCall);
                 }
-                // Clear when call reaches terminal state (Idle=0 or Ending=6)
-                // CallState terminal states: Idle=0, Ending=13
+                this.#activeCall?._updateState(callState);
+                // Robustly parse and emit participants list update
+                const participants = parsed.participants ?? info.participants ?? parsed.participant_list ?? info.participant_list;
+                if (participants && Array.isArray(participants)) {
+                    this.#activeCall?.emit("participants_update", participants);
+                }
+                // Clear when call reaches terminal state (Idle=0 or Ending=13)
                 if (callState === 0 || callState === 13) {
                     this.#activeCall = null;
                 }
