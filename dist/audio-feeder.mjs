@@ -54,20 +54,19 @@ export class AudioFeeder {
         const chunkBytes = chunkSamples * Float32Array.BYTES_PER_ELEMENT;
         const chunkIntervalMs = (this.framesPerChunk / this.sampleRate) * 1000;
         const inputArgs = this.#resolveInputArgs();
-        // Volume level scaling
+        // Volume level scaling boosted by 2.2x for louder playback
         const vol = Math.max(0.01, Math.min(3.0, this.volume));
+        const scaledVol = vol * 2.2;
         // High fidelity anti-crackling filter pipeline:
-        // 1. highpass=f=45 -> Prevents subsonic mud and keeps the audio crisp and clear.
-        // 2. acompressor -> Smooths out extreme high-spikes and peaks in a CPU friendly way.
-        // 3. volume -> Level scale adjustment.
-        // 4. alimiter -> Prevents signal clipping (main cause of "suara kresek") by soft-knee limiting.
-        // 5. aresample -> Resamples cleanly using high-quality soxr and triangular dither.
+        // 1. highpass=f=130 -> Eliminates boomy muddy bass rumble completely.
+        // 2. volume -> High gain amplification.
+        // 3. alimiter -> Soft-knee limiter to prevent clipping ("suara kresek") from high volume.
+        // 4. aresample -> Fast, low-latency resampler (avoids CPU-heavy soxr which causes underflow on VPS).
         const afChain = [
-            `highpass=f=45`,
-            `acompressor=threshold=-12dB:ratio=2.5:attack=15:release=120:makeup=2dB`,
-            vol !== 1.0 ? `volume=${vol.toFixed(3)}` : null,
-            `alimiter=level_in=1.0:level_out=0.95:limit=0.98:attack=5:release=80:asc=1:asc_level=0.5`,
-            `aresample=${this.sampleRate}:resampler=soxr:osr=${this.sampleRate}:precision=24:dither_method=triangular`,
+            `highpass=f=130`,
+            `volume=${scaledVol.toFixed(3)}`,
+            `alimiter=level_in=1.0:level_out=0.98:limit=0.98:attack=5:release=80:asc=1:asc_level=0.5`,
+            `aresample=${this.sampleRate}`,
         ].filter(Boolean).join(",");
         this.#proc = spawn("ffmpeg", [
             "-hide_banner",
@@ -140,6 +139,10 @@ export class AudioFeeder {
         const now = Date.now();
         if (this.#nextEmitAtMs === 0)
             this.#nextEmitAtMs = now;
+        // Resync if the clock drifts too far behind due to VPS CPU steal/GC pauses
+        if (now - this.#nextEmitAtMs > 100) {
+            this.#nextEmitAtMs = now;
+        }
         const delayMs = Math.max(0, this.#nextEmitAtMs - now);
         this.#emitTimer = setTimeout(() => {
             this.#emitTimer = null;
