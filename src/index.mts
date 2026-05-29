@@ -421,6 +421,8 @@ export class VoipClient extends EventEmitter {
       extraData: tcToken,
     });
 
+    this.emit("call", call);
+
     return call;
   };
 

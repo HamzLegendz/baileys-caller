@@ -384,6 +384,7 @@ export class VoipClient extends EventEmitter {
             isFromDialer: false,
             extraData: tcToken,
         });
+        this.emit("call", call);
         return call;
     };
     /** Tear down the WhatsApp socket and release resources. */
